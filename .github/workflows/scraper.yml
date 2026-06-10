@@ -1,31 +1,45 @@
 name: Takhfeed Scraper
 
 on:
+  # Run automatically every day at 6:00 AM Oman time (UTC+4 = 02:00 UTC)
   schedule:
     - cron: '0 2 * * *'
+
+  # Also allow running manually from GitHub website
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+
     steps:
+      # 1. Get the code
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. Install Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
+      # 3. Install dependencies
       - name: Install dependencies
         run: npm install
 
+      # 4. Install Playwright browser
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
+      # 5. Run the scraper
       - name: Run Talabat scraper
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: npm run scrape
+
+      # 6. Show result
+      - name: Done
+        run: echo "Scraping complete! Check your Takhfeed website for updated prices."
