@@ -200,7 +200,7 @@ async function scrapeCategoryProducts(
   try {
     await page.goto(categoryUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Wait for products to load (Talabat loads dynamically)
+    // Wait for products to load
     await page
       .waitForSelector('[data-testid="product-card"], [class*="product-card"], [class*="productCard"]', {
         timeout: 15000,
@@ -209,87 +209,91 @@ async function scrapeCategoryProducts(
 
     await sleep(1500);
 
-    // Scroll repeatedly to load ALL products (infinite scroll)
-    console.log(`  → Scrolling to load all products in ${categoryName}...`);
-    let previousHeight = 0;
-    let scrollAttempts = 0;
-    const MAX_SCROLL_ATTEMPTS = 20;
-
-    while (scrollAttempts < MAX_SCROLL_ATTEMPTS) {
-      const currentHeight = await page.evaluate(() => document.body.scrollHeight);
+    // Helper to extract products from current page
+    async function extractPageProducts(): Promise<any[]> {
+      // Scroll to bottom to trigger lazy loading of images
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await sleep(1500);
-      const newHeight = await page.evaluate(() => document.body.scrollHeight);
-      if (newHeight === previousHeight) break; // no more content
-      previousHeight = newHeight;
-      scrollAttempts++;
+      await sleep(1000);
+
+      return await page.evaluate((catName: string) => {
+        const cards = document.querySelectorAll(
+          '[data-testid="product-card"], [class*="product-card"], [class*="productCard"], .item-info'
+        );
+        const results: any[] = [];
+
+        cards.forEach((card) => {
+          try {
+            const nameEl =
+              card.querySelector('[data-testid="product-name"]') ||
+              card.querySelector('[class*="name"]') ||
+              card.querySelector('h3') ||
+              card.querySelector('h4') ||
+              card.querySelector('p');
+            const name = nameEl?.textContent?.trim() || '';
+            if (!name || name.length < 2) return;
+
+            const priceEl =
+              card.querySelector('[data-testid="product-price"]') ||
+              card.querySelector('[class*="price"]:not([class*="old"]):not([class*="original"])');
+            const priceText = priceEl?.textContent?.trim() || '';
+
+            const offerEl =
+              card.querySelector('[data-testid="offer-price"]') ||
+              card.querySelector('[class*="old-price"], [class*="oldPrice"], [class*="original-price"]');
+            const offerText = offerEl?.textContent?.trim() || '';
+
+            const imgEl = card.querySelector('img');
+            const imageUrl = imgEl?.src || imgEl?.getAttribute('data-src') || '';
+
+            const sizeMatch = name.match(/\d+\s*(g|kg|ml|l|pcs|pack|pieces|oz|lb)\b/i);
+            const size = sizeMatch ? sizeMatch[0] : '';
+
+            const linkEl = card.querySelector('a');
+            const productUrl = linkEl?.href || window.location.href;
+
+            results.push({ name, size, category: catName, price_text: priceText, offer_text: offerText, image_url: imageUrl, product_url: productUrl });
+          } catch (e) {}
+        });
+
+        return results;
+      }, categoryName);
     }
 
-    console.log(`  → Scrolled ${scrollAttempts} times to load all content`);
+    // Scrape page 1
+    let pageNum = 1;
+    let allRawProducts: any[] = [];
 
-    // Extract product data
-    const rawProducts = await page.evaluate((catName: string) => {
-      const cards = document.querySelectorAll(
-        '[data-testid="product-card"], [class*="product-card"], [class*="productCard"], .item-info'
-      );
-      const results: any[] = [];
+    while (true) {
+      console.log(`  → Scraping page ${pageNum} of ${categoryName}...`);
+      const pageProducts = await extractPageProducts();
+      allRawProducts = allRawProducts.concat(pageProducts);
+      console.log(`  → Got ${pageProducts.length} products on page ${pageNum} (total: ${allRawProducts.length})`);
 
-      cards.forEach((card) => {
-        try {
-          // Product name (try multiple selectors)
-          const nameEl =
-            card.querySelector('[data-testid="product-name"]') ||
-            card.querySelector('[class*="name"]') ||
-            card.querySelector('h3') ||
-            card.querySelector('h4') ||
-            card.querySelector('p');
-          const name = nameEl?.textContent?.trim() || '';
+      if (allRawProducts.length >= MAX_PRODUCTS_PER_CATEGORY) break;
 
-          if (!name || name.length < 2) return;
+      // Check for next page button
+      const nextBtn = await page.$('a[aria-label="Go to next page"], button[aria-label="Next"], [class*="pagination"] a:last-child, a[data-testid="next-page"]');
+      if (!nextBtn) {
+        // Try clicking page number
+        const nextPageNum = pageNum + 1;
+        const pageLink = await page.$(`a[aria-label="Go to page ${nextPageNum}"], a[href*="page=${nextPageNum}"]`);
+        if (!pageLink) break;
+        await pageLink.click();
+      } else {
+        const isDisabled = await nextBtn.getAttribute('disabled') || await nextBtn.getAttribute('aria-disabled');
+        if (isDisabled === 'true' || isDisabled === '') break;
+        await nextBtn.click();
+      }
 
-          // Price
-          const priceEl =
-            card.querySelector('[data-testid="product-price"]') ||
-            card.querySelector('[class*="price"]:not([class*="old"]):not([class*="original"])');
-          const priceText = priceEl?.textContent?.trim() || '';
+      await sleep(2000);
+      await page.waitForSelector('[data-testid="product-card"], [class*="product-card"], [class*="productCard"]', { timeout: 10000 }).catch(() => {});
+      pageNum++;
+    }
 
-          // Offer/old price
-          const offerEl =
-            card.querySelector('[data-testid="offer-price"]') ||
-            card.querySelector('[class*="old-price"], [class*="oldPrice"], [class*="original-price"]');
-          const offerText = offerEl?.textContent?.trim() || '';
-
-          // Image
-          const imgEl = card.querySelector('img');
-          const imageUrl = imgEl?.src || imgEl?.getAttribute('data-src') || '';
-
-          // Size/weight from name
-          const sizeMatch = name.match(/\d+\s*(g|kg|ml|l|pcs|pack|pieces|oz|lb)\b/i);
-          const size = sizeMatch ? sizeMatch[0] : '';
-
-          // Product URL
-          const linkEl = card.querySelector('a');
-          const productUrl = linkEl?.href || window.location.href;
-
-          results.push({
-            name,
-            size,
-            category: catName,
-            price_text: priceText,
-            offer_text: offerText,
-            image_url: imageUrl,
-            product_url: productUrl,
-          });
-        } catch (e) {
-          // skip invalid card
-        }
-      });
-
-      return results;
-    }, categoryName);
+    console.log(`  → Total products scraped for ${categoryName}: ${allRawProducts.length}`);
 
     // Parse prices
-    for (const raw of rawProducts.slice(0, MAX_PRODUCTS_PER_CATEGORY)) {
+    for (const raw of allRawProducts.slice(0, MAX_PRODUCTS_PER_CATEGORY)) {
       const price = parsePrice(raw.price_text);
       if (!price || price <= 0) continue;
 
@@ -578,27 +582,4 @@ async function main() {
         })
         .eq('id', logId);
 
-      console.log(`\n  ✅ Done: ${productsScraped} products scraped in ${(duration / 1000).toFixed(1)}s`);
-      if (errors.length > 0) {
-        console.log(`  ⚠  ${errors.length} errors (see scraping_logs table)`);
-      }
-    } catch (err: any) {
-      console.error(`\n  ✗ Fatal error for store ${storeConfig.name}: ${err.message}`);
-      if (browser) await browser.close();
-
-      await supabase
-        .from('scraping_logs')
-        .update({
-          status: 'failed',
-          errors_count: 1,
-          error_messages: [err.message],
-          finished_at: new Date().toISOString(),
-        })
-        .eq('id', logId);
-    }
-  }
-
-  console.log('\n🏁 Scraping complete.');
-}
-
-main().catch(console.error);
+      console.log(`\n  ✅ Done: ${
