@@ -6,8 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "scrape": "npx ts-node --project tsconfig.scripts.json scripts/scraper.ts",
-    "scrape:talabat": "npx ts-node --project tsconfig.scripts.json scripts/scraper.ts --source talabat"
+    "scrape": "npx ts-node --project tsconfig.scripts.json scripts/scraper.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
@@ -15,12 +14,14 @@
     "lucide-react": "^0.344.0",
     "next": "14.1.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "@types/ws": "^8.5.10",
     "autoprefixer": "^10.4.17",
     "playwright": "^1.41.0",
     "postcss": "^8.4.35",
