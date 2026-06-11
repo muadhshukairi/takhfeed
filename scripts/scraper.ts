@@ -31,27 +31,42 @@ const TALABAT_STORES: { name: string; slug: string; url: string }[] = [
   {
     name: 'Lulu Hypermarket',
     slug: 'lulu',
-    url: 'https://www.talabat.com/oman/grocery/690885/lulu-hypermarket-muscat',
+    url: 'https://www.talabat.com/oman/grocery/706051/lulu-hypermarket-ansab',
   },
   {
-    name: 'Carrefour Oman',
-    slug: 'carrefour',
-    url: 'https://www.talabat.com/oman/grocery/338728/carrefour',
+    name: 'HyperMax',
+    slug: 'hypermax',
+    url: 'https://www.talabat.com/oman/grocery/32503/hypermax-seeb-muscat',
   },
   {
     name: 'Sultan Center',
     slug: 'sultan',
-    url: 'https://www.talabat.com/oman/grocery/348077/sultan-center',
+    url: 'https://www.talabat.com/oman/grocery/776366/sultan-center-hail-south',
   },
   {
     name: 'Al Meera',
     slug: 'almeera',
-    url: 'https://www.talabat.com/oman/grocery/631224/al-meera',
+    url: 'https://www.talabat.com/oman/grocery/799774/al-meera-express-the-wave',
   },
   {
-    name: 'Talabat Mart',
-    slug: 'talabat',
-    url: 'https://www.talabat.com/oman/groceries/1416/seeb',
+    name: 'Al Amri Center',
+    slug: 'alamri',
+    url: 'https://www.talabat.com/oman/grocery/725354/al-amri-center-al-koudh',
+  },
+  {
+    name: 'Viva',
+    slug: 'viva',
+    url: 'https://www.talabat.com/oman/grocery/722155/viva-al-koudh',
+  },
+  {
+    name: 'Noor Online',
+    slug: 'noor',
+    url: 'https://www.talabat.com/oman/grocery/670500/noor-online-al-mawalih-south-twin-muscat',
+  },
+  {
+    name: 'Spinneys',
+    slug: 'spinneys',
+    url: 'https://www.talabat.com/oman/grocery/702993/spinneys-the-wave',
   },
 ];
 
