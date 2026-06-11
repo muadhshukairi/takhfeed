@@ -342,51 +342,97 @@ async function scrapeCategories(
   page: Page,
   storeUrl: string
 ): Promise<{ name: string; url: string }[]> {
+  // Instead of scraping categories (which picks up footer links),
+  // we hardcode Talabat's known category slugs and build URLs directly
+  const TALABAT_CATEGORIES = [
+    { name: 'Dairy & Eggs', slug: 'dairy-and-eggs' },
+    { name: 'Dairy & Eggs', slug: 'dairy' },
+    { name: 'Meat & Seafood', slug: 'meat-and-seafood' },
+    { name: 'Meat & Seafood', slug: 'meat-seafood' },
+    { name: 'Fruits & Vegetables', slug: 'fruits-and-vegetables' },
+    { name: 'Fruits & Vegetables', slug: 'fruits-vegetables' },
+    { name: 'Bakery', slug: 'bakery' },
+    { name: 'Beverages', slug: 'beverages' },
+    { name: 'Snacks', slug: 'snacks' },
+    { name: 'Frozen Food', slug: 'frozen-food' },
+    { name: 'Frozen Food', slug: 'frozen' },
+    { name: 'Household', slug: 'household' },
+    { name: 'Household', slug: 'household-essentials' },
+    { name: 'Personal Care', slug: 'personal-care' },
+    { name: 'Baby & Kids', slug: 'baby-and-kids' },
+    { name: 'Pantry', slug: 'pantry' },
+    { name: 'Canned & Jarred', slug: 'canned-and-jarred' },
+    { name: 'Cooking & Baking', slug: 'cooking-and-baking' },
+    { name: 'Breakfast', slug: 'breakfast-food' },
+    { name: 'Cleaning', slug: 'cleaning-and-laundry' },
+    { name: 'Condiments', slug: 'condiments' },
+    { name: 'Coffee & Tea', slug: 'coffee-and-tea' },
+    { name: 'Ice Cream', slug: 'ice-cream' },
+    { name: 'Pet Care', slug: 'pet-care' },
+  ];
+
+  const baseUrl = storeUrl.split('?')[0]; // remove query params
   const categories: { name: string; url: string }[] = [];
 
+  // Try to discover real categories from the store page first
   try {
-    await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(2000);
+    await page.goto(storeUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await sleep(3000);
 
     const cats = await page.evaluate(() => {
       const items: { name: string; url: string }[] = [];
-
-      // Talabat category links
+      // Look specifically for category links in the sidebar/menu area
       const selectors = [
-        'a[href*="/category/"]',
         'a[href*="/c/"]',
-        '[class*="category"] a',
-        '[data-testid="category-item"] a',
-        'nav a',
+        'a[href*="/category/"]',
+        '[data-testid*="category"] a',
+        '[class*="CategoryItem"] a',
+        '[class*="category-item"] a',
+        'aside a',
+        '[class*="sidebar"] a',
       ];
 
       for (const sel of selectors) {
         const els = document.querySelectorAll(sel);
-        if (els.length > 2) {
-          els.forEach((el) => {
-            const name = el.textContent?.trim() || '';
-            const href = (el as HTMLAnchorElement).href || '';
-            if (name && href && href.includes('talabat.com')) {
-              items.push({ name, url: href });
-            }
-          });
-          if (items.length > 0) break;
-        }
+        els.forEach((el) => {
+          const name = el.textContent?.trim() || '';
+          const href = (el as HTMLAnchorElement).href || '';
+          // Filter out footer/nav links
+          if (name && href && href.includes('talabat.com') &&
+              !['Corporate', 'Become a partner', 'Blog', 'Privacy', 'Terms', 'Contact', 'About', 'Careers'].includes(name) &&
+              name.length > 1 && name.length < 50) {
+            items.push({ name, url: href });
+          }
+        });
+        if (items.length > 3) break;
       }
-
       return items;
     });
 
-    // Deduplicate
     const seen = new Set<string>();
     for (const cat of cats) {
-      if (!seen.has(cat.url) && cat.name.length > 1) {
+      if (!seen.has(cat.url)) {
         seen.add(cat.url);
         categories.push(cat);
       }
     }
   } catch (err: any) {
-    console.error(`  ✗ Error scraping categories: ${err.message}`);
+    console.warn(`  ⚠ Could not discover categories: ${err.message}`);
+  }
+
+  // If we found real categories, use them
+  if (categories.length > 3) {
+    console.log(`  ✓ Found ${categories.length} real categories from store page`);
+    return categories.slice(0, MAX_CATEGORIES);
+  }
+
+  // Otherwise fall back to hardcoded category URLs
+  console.log(`  → Using hardcoded category URLs for ${baseUrl}`);
+  for (const cat of TALABAT_CATEGORIES) {
+    categories.push({
+      name: cat.name,
+      url: `${baseUrl}/c/${cat.slug}`,
+    });
   }
 
   return categories.slice(0, MAX_CATEGORIES);
@@ -540,12 +586,19 @@ async function main() {
 
       const context = await browser.newContext({
         userAgent:
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         locale: 'en-US',
         viewport: { width: 1280, height: 800 },
         extraHTTPHeaders: {
           'Accept-Language': 'en-US,en;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         },
+      });
+
+      // Remove webdriver flag to avoid bot detection
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        (window as any).chrome = { runtime: {} };
       });
 
       const page = await context.newPage();
