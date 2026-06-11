@@ -209,18 +209,23 @@ async function scrapeCategoryProducts(
 
     await sleep(1500);
 
-    // Helper to extract products from current page
-    async function extractPageProducts(): Promise<any[]> {
-      // Scroll to bottom to trigger lazy loading of images
+    // Scrape all pages
+    let pageNum = 1;
+    let allRawProducts: any[] = [];
+
+    while (true) {
+      console.log(`  → Scraping page ${pageNum} of ${categoryName}...`);
+
+      // Scroll to load lazy content
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await sleep(1000);
 
-      return await page.evaluate((catName: string) => {
+      // Extract products from current page
+      const pageProducts = await page.evaluate((catName: string) => {
         const cards = document.querySelectorAll(
           '[data-testid="product-card"], [class*="product-card"], [class*="productCard"], .item-info'
         );
         const results: any[] = [];
-
         cards.forEach((card) => {
           try {
             const nameEl =
@@ -254,35 +259,37 @@ async function scrapeCategoryProducts(
             results.push({ name, size, category: catName, price_text: priceText, offer_text: offerText, image_url: imageUrl, product_url: productUrl });
           } catch (e) {}
         });
-
         return results;
       }, categoryName);
-    }
 
-    // Scrape page 1
-    let pageNum = 1;
-    let allRawProducts: any[] = [];
-
-    while (true) {
-      console.log(`  → Scraping page ${pageNum} of ${categoryName}...`);
-      const pageProducts = await extractPageProducts();
       allRawProducts = allRawProducts.concat(pageProducts);
       console.log(`  → Got ${pageProducts.length} products on page ${pageNum} (total: ${allRawProducts.length})`);
 
       if (allRawProducts.length >= MAX_PRODUCTS_PER_CATEGORY) break;
 
-      // Check for next page button
-      const nextBtn = await page.$('a[aria-label="Go to next page"], button[aria-label="Next"], [class*="pagination"] a:last-child, a[data-testid="next-page"]');
-      if (!nextBtn) {
-        // Try clicking page number
-        const nextPageNum = pageNum + 1;
-        const pageLink = await page.$(`a[aria-label="Go to page ${nextPageNum}"], a[href*="page=${nextPageNum}"]`);
-        if (!pageLink) break;
-        await pageLink.click();
-      } else {
-        const isDisabled = await nextBtn.getAttribute('disabled') || await nextBtn.getAttribute('aria-disabled');
-        if (isDisabled === 'true' || isDisabled === '') break;
-        await nextBtn.click();
+      // Try to go to next page
+      const nextPageNum = pageNum + 1;
+      const nextPageClicked = await page.evaluate((nextNum: number) => {
+        // Try aria-label
+        const byAria = document.querySelector(`a[aria-label="Go to page ${nextNum}"]`) as HTMLElement;
+        if (byAria) { byAria.click(); return true; }
+        // Try by text content in pagination
+        const allLinks = document.querySelectorAll('[class*="pagination"] a, [class*="Pagination"] a');
+        for (const link of Array.from(allLinks)) {
+          if (link.textContent?.trim() === String(nextNum)) {
+            (link as HTMLElement).click();
+            return true;
+          }
+        }
+        // Try next button
+        const nextBtn = document.querySelector('a[aria-label="Go to next page"], button[aria-label="Next page"]') as HTMLElement;
+        if (nextBtn && !nextBtn.getAttribute('disabled')) { nextBtn.click(); return true; }
+        return false;
+      }, nextPageNum);
+
+      if (!nextPageClicked) {
+        console.log(`  → No more pages for ${categoryName}`);
+        break;
       }
 
       await sleep(2000);
@@ -582,4 +589,27 @@ async function main() {
         })
         .eq('id', logId);
 
-      console.log(`\n  ✅ Done: ${
+      console.log(`\n  ✅ Done: ${productsScraped} products scraped in ${(duration / 1000).toFixed(1)}s`);
+      if (errors.length > 0) {
+        console.log(`  ⚠  ${errors.length} errors (see scraping_logs table)`);
+      }
+    } catch (err: any) {
+      console.error(`\n  ✗ Fatal error for store ${storeConfig.name}: ${err.message}`);
+      if (browser) await browser.close();
+
+      await supabase
+        .from('scraping_logs')
+        .update({
+          status: 'failed',
+          errors_count: 1,
+          error_messages: [err.message],
+          finished_at: new Date().toISOString(),
+        })
+        .eq('id', logId);
+    }
+  }
+
+  console.log('\n🏁 Scraping complete.');
+}
+
+main().catch(console.error);
