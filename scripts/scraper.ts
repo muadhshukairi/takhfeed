@@ -1,683 +1,233 @@
-/**
- * Talabat Oman Grocery Scraper
- * Uses Playwright to scrape product listings from Talabat grocery pages.
- *
- * Usage:
- *   npx ts-node --project tsconfig.scripts.json scripts/scraper.ts
- *
- * Env vars required (in .env.local):
- *   NEXT_PUBLIC_SUPABASE_URL
- *   SUPABASE_SERVICE_ROLE_KEY
- *
- * Rate limiting: 2–5 second delays between requests, max 3 concurrent pages.
- */
-
-import { chromium, Browser, Page } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
-import * as fs from 'fs';
 import * as path from 'path';
+import * as fs from 'fs';
 import ws from 'ws';
 
-// Fix for Node.js < 22 WebSocket support (needed for Supabase)
 (globalThis as any).WebSocket = ws;
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-const TALABAT_STORES: { name: string; slug: string; url: string }[] = [
-  {
-    name: 'Lulu Hypermarket',
-    slug: 'lulu',
-    url: 'https://www.talabat.com/oman/grocery/706051/lulu-hypermarket-ansab',
-  },
-  {
-    name: 'HyperMax',
-    slug: 'hypermax',
-    url: 'https://www.talabat.com/oman/grocery/32503/hypermax-seeb-muscat',
-  },
-  {
-    name: 'Sultan Center',
-    slug: 'sultan',
-    url: 'https://www.talabat.com/oman/grocery/776366/sultan-center-hail-south',
-  },
-  {
-    name: 'Al Meera',
-    slug: 'almeera',
-    url: 'https://www.talabat.com/oman/grocery/799774/al-meera-express-the-wave',
-  },
-  {
-    name: 'Al Amri Center',
-    slug: 'alamri',
-    url: 'https://www.talabat.com/oman/grocery/725354/al-amri-center-al-koudh',
-  },
-  {
-    name: 'Viva',
-    slug: 'viva',
-    url: 'https://www.talabat.com/oman/grocery/722155/viva-al-koudh',
-  },
-  {
-    name: 'Noor Online',
-    slug: 'noor',
-    url: 'https://www.talabat.com/oman/grocery/670500/noor-online-al-mawalih-south-twin-muscat',
-  },
-  {
-    name: 'Spinneys',
-    slug: 'spinneys',
-    url: 'https://www.talabat.com/oman/grocery/702993/spinneys-the-wave',
-  },
+// ── Stores to scrape ────────────────────────────────────────────────────────
+const STORES = [
+  { name: 'Lulu Hypermarket',  slug: 'lulu',      id: 706051 },
+  { name: 'HyperMax',          slug: 'hypermax',   id: 32503  },
+  { name: 'Sultan Center',     slug: 'sultan',     id: 776366 },
+  { name: 'Al Meera',          slug: 'almeera',    id: 799774 },
+  { name: 'Al Amri Center',    slug: 'alamri',     id: 725354 },
+  { name: 'Viva',              slug: 'viva',        id: 722155 },
+  { name: 'Noor Online',       slug: 'noor',        id: 670500 },
+  { name: 'Spinneys',          slug: 'spinneys',    id: 702993 },
 ];
 
-const DELAY_MIN_MS = 1500;
-const DELAY_MAX_MS = 3000;
-const MAX_CATEGORIES = 50; // scrape all categories
-const MAX_PRODUCTS_PER_CATEGORY = 500; // get all products per category
+const TALABAT_API = 'https://www.talabat.com/api/v1';
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.talabat.com/',
+  'Origin': 'https://www.talabat.com',
+  'x-talabat-platform': 'web',
+};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function randomDelay() {
-  const ms = DELAY_MIN_MS + Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS);
-  return sleep(ms);
-}
-
-function slugify(text: string) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-}
-
-function parsePrice(text: string): number | null {
-  const match = text.replace(/,/g, '').match(/[\d.]+/);
-  return match ? parseFloat(match[0]) : null;
-}
-
-function normalizeProductName(name: string) {
-  return name.toLowerCase().trim().replace(/\s+/g, ' ');
-}
-
-// ---------------------------------------------------------------------------
-// Supabase client (service role for writes)
-// ---------------------------------------------------------------------------
 function getSupabase() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    throw new Error(
-      'Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.\n' +
-        'Copy .env.local.example to .env.local and fill in your Supabase credentials.'
-    );
+    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.');
   }
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 }
 
-// ---------------------------------------------------------------------------
-// Scraper
-// ---------------------------------------------------------------------------
-interface ScrapedProduct {
-  name: string;
-  brand?: string;
-  size?: string;
-  category: string;
-  price: number;
-  offer_price?: number;
-  image_url?: string;
-  product_url: string;
+async function fetchJson(url: string): Promise<any> {
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
 }
 
-interface StoreInfo {
-  name: string;
-  slug: string;
-  url: string;
-  delivery_fee?: number;
-  min_order?: number;
-  delivery_time_min?: number;
-  delivery_time_max?: number;
-  rating?: number;
+function parsePrice(text: string | undefined): number | null {
+  if (!text) return null;
+  const m = text.replace(/,/g, '').match(/[\d.]+/);
+  return m ? parseFloat(m[0]) : null;
 }
 
-async function scrapeStoreInfo(page: Page, storeUrl: string): Promise<StoreInfo> {
-  console.log(`  → Scraping store info from ${storeUrl}`);
-  await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(2000);
+async function scrapeStore(supabase: any, store: typeof STORES[0]) {
+  console.log(`\n📦 Scraping ${store.name} (id: ${store.id})`);
 
-  let deliveryFee: number | undefined;
-  let minOrder: number | undefined;
-  let deliveryTimeMin: number | undefined;
-  let deliveryTimeMax: number | undefined;
-  let rating: number | undefined;
+  // 1. Upsert store
+  const { data: storeData, error: storeErr } = await supabase
+    .from('stores')
+    .upsert({ name: store.name, slug: store.slug, source: 'talabat', is_active: true, updated_at: new Date().toISOString() }, { onConflict: 'slug' })
+    .select('id').single();
+  if (storeErr) { console.error(`  ✗ Store upsert failed: ${storeErr.message}`); return; }
+  const storeId = storeData.id;
+  console.log(`  ✓ Store ready (id: ${storeId})`);
 
+  // 2. Get categories via API
+  let categories: { id: number; name: string }[] = [];
   try {
-    // Delivery fee
-    const feeEl = await page.$('[data-testid="delivery-fee"], .delivery-fee, [class*="deliveryFee"]');
-    if (feeEl) {
-      const feeText = await feeEl.textContent();
-      if (feeText) deliveryFee = parsePrice(feeText) ?? undefined;
+    const catUrl = `${TALABAT_API}/vendor/${store.id}/menu?languageCode=en`;
+    console.log(`  → Fetching categories from: ${catUrl}`);
+    const catData = await fetchJson(catUrl);
+    if (catData?.categories) {
+      categories = catData.categories.map((c: any) => ({ id: c.id, name: c.name }));
+    } else if (catData?.data?.categories) {
+      categories = catData.data.categories.map((c: any) => ({ id: c.id, name: c.name }));
     }
-
-    // Min order
-    const minEl = await page.$('[data-testid="minimum-order"], [class*="minOrder"]');
-    if (minEl) {
-      const minText = await minEl.textContent();
-      if (minText) minOrder = parsePrice(minText) ?? undefined;
+    console.log(`  ✓ Found ${categories.length} categories`);
+  } catch (e: any) {
+    console.warn(`  ⚠ Could not fetch categories via API: ${e.message}`);
+    // Try alternative endpoint
+    try {
+      const altUrl = `${TALABAT_API}/vendor/${store.id}/categories?languageCode=en`;
+      const altData = await fetchJson(altUrl);
+      if (Array.isArray(altData)) categories = altData.map((c: any) => ({ id: c.id, name: c.name || c.title }));
+      else if (altData?.categories) categories = altData.categories.map((c: any) => ({ id: c.id, name: c.name }));
+      console.log(`  ✓ Found ${categories.length} categories (alt endpoint)`);
+    } catch (e2: any) {
+      console.error(`  ✗ Alt categories also failed: ${e2.message}`);
     }
-
-    // Delivery time
-    const timeEl = await page.$('[data-testid="delivery-time"], [class*="deliveryTime"]');
-    if (timeEl) {
-      const timeText = await timeEl.textContent();
-      if (timeText) {
-        const times = timeText.match(/(\d+)/g);
-        if (times && times.length >= 2) {
-          deliveryTimeMin = parseInt(times[0]);
-          deliveryTimeMax = parseInt(times[1]);
-        } else if (times && times.length === 1) {
-          deliveryTimeMin = parseInt(times[0]);
-          deliveryTimeMax = parseInt(times[0]);
-        }
-      }
-    }
-
-    // Rating
-    const ratingEl = await page.$('[data-testid="vendor-rating"], [class*="rating"]');
-    if (ratingEl) {
-      const ratingText = await ratingEl.textContent();
-      if (ratingText) rating = parsePrice(ratingText) ?? undefined;
-    }
-  } catch (e) {
-    console.warn('  ⚠ Could not parse some store info fields');
   }
 
-  return {
-    name: TALABAT_STORES.find((s) => s.url === storeUrl)?.name || 'Unknown Store',
-    slug: TALABAT_STORES.find((s) => s.url === storeUrl)?.slug || slugify(storeUrl),
-    url: storeUrl,
-    delivery_fee: deliveryFee,
-    min_order: minOrder,
-    delivery_time_min: deliveryTimeMin,
-    delivery_time_max: deliveryTimeMax,
-    rating,
-  };
-}
+  if (categories.length === 0) {
+    // Try getting products directly without categories
+    console.log(`  → Trying direct products endpoint...`);
+    await scrapeProductsDirect(supabase, store, storeId);
+    return;
+  }
 
-async function scrapeCategoryProducts(
-  page: Page,
-  categoryUrl: string,
-  categoryName: string
-): Promise<ScrapedProduct[]> {
-  const products: ScrapedProduct[] = [];
+  // 3. Get products per category
+  let totalProducts = 0;
+  for (const cat of categories) {
+    try {
+      console.log(`  📂 Category: ${cat.name}`);
+      await sleep(500);
 
-  try {
-    await page.goto(categoryUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      let page = 1;
+      let hasMore = true;
+      let catProducts = 0;
 
-    // Wait for products to load
-    await page
-      .waitForSelector('[data-testid="product-card"], [class*="product-card"], [class*="productCard"]', {
-        timeout: 15000,
-      })
-      .catch(() => console.warn(`  ⚠ No product cards found for category: ${categoryName}`));
+      while (hasMore) {
+        const prodUrl = `${TALABAT_API}/vendor/${store.id}/items?categoryId=${cat.id}&page=${page}&pageSize=50&languageCode=en`;
+        const prodData = await fetchJson(prodUrl);
 
-    await sleep(1500);
+        const items: any[] = prodData?.items || prodData?.data?.items || prodData?.products || [];
+        if (items.length === 0) { hasMore = false; break; }
 
-    // Scrape all pages
-    let pageNum = 1;
-    let allRawProducts: any[] = [];
+        for (const item of items) {
+          const name = item.name || item.nameEn || item.title || '';
+          const price = item.price || item.priceValue || item.originalPrice || 0;
+          const offerPrice = item.discountedPrice || item.promotionalPrice || null;
+          const imageUrl = item.imageUrl || item.image || item.photo || null;
+          const size = item.size || item.weight || item.quantity || null;
 
-    while (true) {
-      console.log(`  → Scraping page ${pageNum} of ${categoryName}...`);
+          if (!name || !price) continue;
 
-      // Scroll to load lazy content
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await sleep(1000);
+          // Upsert category
+          const catSlug = cat.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+          const { data: catRow } = await supabase.from('categories')
+            .upsert({ name: cat.name, slug: catSlug }, { onConflict: 'slug' })
+            .select('id').single();
 
-      // Extract products from current page
-      const pageProducts = await page.evaluate((catName: string) => {
-        const cards = document.querySelectorAll(
-          '[data-testid="product-card"], [class*="product-card"], [class*="productCard"], .item-info'
-        );
-        const results: any[] = [];
-        cards.forEach((card) => {
-          try {
-            const nameEl =
-              card.querySelector('[data-testid="product-name"]') ||
-              card.querySelector('[class*="name"]') ||
-              card.querySelector('h3') ||
-              card.querySelector('h4') ||
-              card.querySelector('p');
-            const name = nameEl?.textContent?.trim() || '';
-            if (!name || name.length < 2) return;
+          // Upsert product
+          const normalized = name.toLowerCase().trim().replace(/\s+/g, ' ');
+          let productId: string;
+          const { data: existingProd } = await supabase.from('products')
+            .select('id').eq('name_normalized', normalized).maybeSingle();
 
-            const priceEl =
-              card.querySelector('[data-testid="product-price"]') ||
-              card.querySelector('[class*="price"]:not([class*="old"]):not([class*="original"])');
-            const priceText = priceEl?.textContent?.trim() || '';
-
-            const offerEl =
-              card.querySelector('[data-testid="offer-price"]') ||
-              card.querySelector('[class*="old-price"], [class*="oldPrice"], [class*="original-price"]');
-            const offerText = offerEl?.textContent?.trim() || '';
-
-            const imgEl = card.querySelector('img');
-            const imageUrl = imgEl?.src || imgEl?.getAttribute('data-src') || '';
-
-            const sizeMatch = name.match(/\d+\s*(g|kg|ml|l|pcs|pack|pieces|oz|lb)\b/i);
-            const size = sizeMatch ? sizeMatch[0] : '';
-
-            const linkEl = card.querySelector('a');
-            const productUrl = linkEl?.href || window.location.href;
-
-            results.push({ name, size, category: catName, price_text: priceText, offer_text: offerText, image_url: imageUrl, product_url: productUrl });
-          } catch (e) {}
-        });
-        return results;
-      }, categoryName);
-
-      allRawProducts = allRawProducts.concat(pageProducts);
-      console.log(`  → Got ${pageProducts.length} products on page ${pageNum} (total: ${allRawProducts.length})`);
-
-      if (allRawProducts.length >= MAX_PRODUCTS_PER_CATEGORY) break;
-
-      // Try to go to next page
-      const nextPageNum = pageNum + 1;
-      const nextPageClicked = await page.evaluate((nextNum: number) => {
-        // Try aria-label
-        const byAria = document.querySelector(`a[aria-label="Go to page ${nextNum}"]`) as HTMLElement;
-        if (byAria) { byAria.click(); return true; }
-        // Try by text content in pagination
-        const allLinks = document.querySelectorAll('[class*="pagination"] a, [class*="Pagination"] a');
-        for (const link of Array.from(allLinks)) {
-          if (link.textContent?.trim() === String(nextNum)) {
-            (link as HTMLElement).click();
-            return true;
+          if (existingProd) {
+            productId = existingProd.id;
+          } else {
+            const { data: newProd, error: prodErr } = await supabase.from('products')
+              .insert({ name, name_normalized: normalized, size, category_id: catRow?.id, image_url: imageUrl, updated_at: new Date().toISOString() })
+              .select('id').single();
+            if (prodErr) continue;
+            productId = newProd.id;
           }
-        }
-        // Try next button
-        const nextBtn = document.querySelector('a[aria-label="Go to next page"], button[aria-label="Next page"]') as HTMLElement;
-        if (nextBtn && !nextBtn.getAttribute('disabled')) { nextBtn.click(); return true; }
-        return false;
-      }, nextPageNum);
 
-      if (!nextPageClicked) {
-        console.log(`  → No more pages for ${categoryName}`);
-        break;
+          // Upsert price
+          await supabase.from('product_prices').upsert({
+            product_id: productId,
+            store_id: storeId,
+            price: parseFloat(price),
+            offer_price: offerPrice ? parseFloat(offerPrice) : null,
+            is_available: true,
+            scraped_at: new Date().toISOString(),
+          }, { onConflict: 'product_id,store_id' });
+
+          catProducts++;
+        }
+
+        console.log(`     Page ${page}: ${items.length} items (total: ${catProducts})`);
+        hasMore = items.length === 50;
+        page++;
+        await sleep(300);
       }
 
-      await sleep(2000);
-      await page.waitForSelector('[data-testid="product-card"], [class*="product-card"], [class*="productCard"]', { timeout: 10000 }).catch(() => {});
-      pageNum++;
+      console.log(`     ✓ ${catProducts} products for ${cat.name}`);
+      totalProducts += catProducts;
+    } catch (e: any) {
+      console.error(`  ✗ Error in category ${cat.name}: ${e.message}`);
     }
-
-    console.log(`  → Total products scraped for ${categoryName}: ${allRawProducts.length}`);
-
-    // Parse prices
-    for (const raw of allRawProducts.slice(0, MAX_PRODUCTS_PER_CATEGORY)) {
-      const price = parsePrice(raw.price_text);
-      if (!price || price <= 0) continue;
-
-      const offerPrice = raw.offer_text ? parsePrice(raw.offer_text) : undefined;
-
-      products.push({
-        name: raw.name,
-        size: raw.size || undefined,
-        category: raw.category,
-        price,
-        offer_price: offerPrice && offerPrice < price ? offerPrice : undefined,
-        image_url: raw.image_url || undefined,
-        product_url: raw.product_url,
-      });
-    }
-  } catch (err: any) {
-    console.error(`  ✗ Error scraping category ${categoryName}: ${err.message}`);
   }
 
-  return products;
+  console.log(`  ✅ Done: ${totalProducts} products scraped for ${store.name}`);
 }
 
-async function scrapeCategories(
-  page: Page,
-  storeUrl: string
-): Promise<{ name: string; url: string }[]> {
-  // Instead of scraping categories (which picks up footer links),
-  // we hardcode Talabat's known category slugs and build URLs directly
-  const TALABAT_CATEGORIES = [
-    { name: 'Dairy & Eggs', slug: 'dairy-and-eggs' },
-    { name: 'Dairy & Eggs', slug: 'dairy' },
-    { name: 'Meat & Seafood', slug: 'meat-and-seafood' },
-    { name: 'Meat & Seafood', slug: 'meat-seafood' },
-    { name: 'Fruits & Vegetables', slug: 'fruits-and-vegetables' },
-    { name: 'Fruits & Vegetables', slug: 'fruits-vegetables' },
-    { name: 'Bakery', slug: 'bakery' },
-    { name: 'Beverages', slug: 'beverages' },
-    { name: 'Snacks', slug: 'snacks' },
-    { name: 'Frozen Food', slug: 'frozen-food' },
-    { name: 'Frozen Food', slug: 'frozen' },
-    { name: 'Household', slug: 'household' },
-    { name: 'Household', slug: 'household-essentials' },
-    { name: 'Personal Care', slug: 'personal-care' },
-    { name: 'Baby & Kids', slug: 'baby-and-kids' },
-    { name: 'Pantry', slug: 'pantry' },
-    { name: 'Canned & Jarred', slug: 'canned-and-jarred' },
-    { name: 'Cooking & Baking', slug: 'cooking-and-baking' },
-    { name: 'Breakfast', slug: 'breakfast-food' },
-    { name: 'Cleaning', slug: 'cleaning-and-laundry' },
-    { name: 'Condiments', slug: 'condiments' },
-    { name: 'Coffee & Tea', slug: 'coffee-and-tea' },
-    { name: 'Ice Cream', slug: 'ice-cream' },
-    { name: 'Pet Care', slug: 'pet-care' },
+async function scrapeProductsDirect(supabase: any, store: typeof STORES[0], storeId: string) {
+  // Try various API endpoints
+  const endpoints = [
+    `${TALABAT_API}/vendor/${store.id}/items?page=1&pageSize=100&languageCode=en`,
+    `${TALABAT_API}/grocery/${store.id}/products?languageCode=en`,
+    `https://api.talabat.com/v2/vendor/${store.id}/menu?languageCode=en`,
   ];
 
-  const baseUrl = storeUrl.split('?')[0]; // remove query params
-  const categories: { name: string; url: string }[] = [];
-
-  // Try to discover real categories from the store page first
-  try {
-    await page.goto(storeUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    await sleep(3000);
-
-    const cats = await page.evaluate(() => {
-      const items: { name: string; url: string }[] = [];
-      // Look specifically for category links in the sidebar/menu area
-      const selectors = [
-        'a[href*="/c/"]',
-        'a[href*="/category/"]',
-        '[data-testid*="category"] a',
-        '[class*="CategoryItem"] a',
-        '[class*="category-item"] a',
-        'aside a',
-        '[class*="sidebar"] a',
-      ];
-
-      for (const sel of selectors) {
-        const els = document.querySelectorAll(sel);
-        els.forEach((el) => {
-          const name = el.textContent?.trim() || '';
-          const href = (el as HTMLAnchorElement).href || '';
-          // Filter out footer/nav links
-          if (name && href && href.includes('talabat.com') &&
-              !['Corporate', 'Become a partner', 'Blog', 'Privacy', 'Terms', 'Contact', 'About', 'Careers'].includes(name) &&
-              name.length > 1 && name.length < 50) {
-            items.push({ name, url: href });
-          }
-        });
-        if (items.length > 3) break;
+  for (const url of endpoints) {
+    try {
+      console.log(`  → Trying: ${url}`);
+      const data = await fetchJson(url);
+      const items: any[] = data?.items || data?.products || data?.data?.items || [];
+      if (items.length > 0) {
+        console.log(`  ✓ Found ${items.length} products directly`);
+        // Process items...
+        return;
       }
-      return items;
-    });
-
-    const seen = new Set<string>();
-    for (const cat of cats) {
-      if (!seen.has(cat.url)) {
-        seen.add(cat.url);
-        categories.push(cat);
-      }
+    } catch (e: any) {
+      console.warn(`  ⚠ ${url}: ${e.message}`);
     }
-  } catch (err: any) {
-    console.warn(`  ⚠ Could not discover categories: ${err.message}`);
   }
-
-  // If we found real categories, use them
-  if (categories.length > 3) {
-    console.log(`  ✓ Found ${categories.length} real categories from store page`);
-    return categories.slice(0, MAX_CATEGORIES);
-  }
-
-  // Otherwise fall back to hardcoded category URLs
-  console.log(`  → Using hardcoded category URLs for ${baseUrl}`);
-  for (const cat of TALABAT_CATEGORIES) {
-    categories.push({
-      name: cat.name,
-      url: `${baseUrl}/c/${cat.slug}`,
-    });
-  }
-
-  return categories.slice(0, MAX_CATEGORIES);
+  console.log(`  ✗ No products found for ${store.name} - API may require auth`);
 }
 
-// ---------------------------------------------------------------------------
-// Database upserts
-// ---------------------------------------------------------------------------
-async function upsertStore(supabase: any, info: StoreInfo): Promise<string> {
-  const { data, error } = await supabase
-    .from('stores')
-    .upsert(
-      {
-        name: info.name,
-        slug: info.slug,
-        source: 'talabat',
-        url: info.url,
-        delivery_fee: info.delivery_fee,
-        min_order: info.min_order,
-        delivery_time_min: info.delivery_time_min,
-        delivery_time_max: info.delivery_time_max,
-        rating: info.rating,
-        is_active: true,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'slug', ignoreDuplicates: false }
-    )
-    .select('id')
-    .single();
-
-  if (error) throw new Error(`Store upsert failed: ${error.message}`);
-  return data.id;
-}
-
-async function upsertCategory(supabase: any, name: string): Promise<string> {
-  const slug = slugify(name);
-  const { data, error } = await supabase
-    .from('categories')
-    .upsert({ name, slug }, { onConflict: 'slug', ignoreDuplicates: false })
-    .select('id')
-    .single();
-
-  if (error) throw new Error(`Category upsert failed: ${error.message}`);
-  return data.id;
-}
-
-async function upsertProduct(
-  supabase: any,
-  product: ScrapedProduct,
-  categoryId: string
-): Promise<string> {
-  const normalized = normalizeProductName(product.name);
-
-  // Try to find existing product by normalized name
-  const { data: existing } = await supabase
-    .from('products')
-    .select('id')
-    .eq('name_normalized', normalized)
-    .maybeSingle();
-
-  if (existing) return existing.id;
-
-  const { data, error } = await supabase
-    .from('products')
-    .insert({
-      name: product.name,
-      name_normalized: normalized,
-      size: product.size,
-      category_id: categoryId,
-      image_url: product.image_url,
-      updated_at: new Date().toISOString(),
-    })
-    .select('id')
-    .single();
-
-  if (error) throw new Error(`Product insert failed: ${error.message}`);
-  return data.id;
-}
-
-async function upsertPrice(
-  supabase: any,
-  productId: string,
-  storeId: string,
-  product: ScrapedProduct
-) {
-  const { error } = await supabase.from('product_prices').upsert(
-    {
-      product_id: productId,
-      store_id: storeId,
-      price: product.price,
-      offer_price: product.offer_price,
-      is_available: true,
-      product_url: product.product_url,
-      scraped_at: new Date().toISOString(),
-    },
-    { onConflict: 'product_id,store_id', ignoreDuplicates: false }
-  );
-
-  if (error) throw new Error(`Price upsert failed: ${error.message}`);
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 async function main() {
-  console.log('🛒 Oman Grocery Scraper — Talabat');
+  console.log('🛒 Oman Grocery Scraper — Talabat API');
   console.log('=====================================\n');
 
-  // Load env from .env.local if running outside Next.js
+  // Load .env.local if available
   const envPath = path.join(__dirname, '..', '.env.local');
   if (fs.existsSync(envPath)) {
     const env = fs.readFileSync(envPath, 'utf-8');
-    env.split('\n').forEach((line) => {
-      const [key, ...rest] = line.split('=');
-      if (key && rest.length) {
-        process.env[key.trim()] = rest.join('=').trim();
-      }
-    });
-  }
-
-  const supabase = getSupabase();
-
-  let browser: Browser | null = null;
-
-  for (const storeConfig of TALABAT_STORES) {
-    const logId = (
-      await supabase
-        .from('scraping_logs')
-        .insert({
-          source: 'talabat',
-          status: 'running',
-          started_at: new Date().toISOString(),
-        })
-        .select('id')
-        .single()
-    ).data?.id;
-
-    const errors: string[] = [];
-    let productsScraped = 0;
-    let productsUpdated = 0;
-    const startTime = Date.now();
-
-    try {
-      console.log(`\n📦 Store: ${storeConfig.name}`);
-      console.log(`   URL: ${storeConfig.url}\n`);
-
-      browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
-      });
-
-      const context = await browser.newContext({
-        userAgent:
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        locale: 'en-US',
-        viewport: { width: 1280, height: 800 },
-        extraHTTPHeaders: {
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        },
-      });
-
-      // Remove webdriver flag to avoid bot detection
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        (window as any).chrome = { runtime: {} };
-      });
-
-      const page = await context.newPage();
-
-      // 1. Scrape store info
-      const storeInfo = await scrapeStoreInfo(page, storeConfig.url);
-      const storeId = await upsertStore(supabase, storeInfo);
-      console.log(`  ✓ Store upserted (id: ${storeId})`);
-
-      // 2. Scrape categories
-      await randomDelay();
-      const categories = await scrapeCategories(page, storeConfig.url);
-      console.log(`  ✓ Found ${categories.length} categories\n`);
-
-      // 3. Scrape products per category
-      for (const cat of categories) {
-        console.log(`  📂 Category: ${cat.name}`);
-        await randomDelay();
-
-        try {
-          const categoryId = await upsertCategory(supabase, cat.name);
-          const products = await scrapeCategoryProducts(page, cat.url, cat.name);
-          console.log(`     Found ${products.length} products`);
-
-          for (const product of products) {
-            try {
-              const productId = await upsertProduct(supabase, product, categoryId);
-              await upsertPrice(supabase, productId, storeId, product);
-              productsScraped++;
-              productsUpdated++;
-            } catch (err: any) {
-              errors.push(`Product "${product.name}": ${err.message}`);
-            }
-          }
-        } catch (err: any) {
-          errors.push(`Category "${cat.name}": ${err.message}`);
-        }
-      }
-
-      await browser.close();
-      browser = null;
-
-      // Update log
-      const duration = Date.now() - startTime;
-      await supabase
-        .from('scraping_logs')
-        .update({
-          store_id: storeId,
-          status: errors.length === 0 ? 'success' : 'partial',
-          products_scraped: productsScraped,
-          products_updated: productsUpdated,
-          errors_count: errors.length,
-          error_messages: errors.slice(0, 20),
-          duration_ms: duration,
-          finished_at: new Date().toISOString(),
-        })
-        .eq('id', logId);
-
-      console.log(`\n  ✅ Done: ${productsScraped} products scraped in ${(duration / 1000).toFixed(1)}s`);
-      if (errors.length > 0) {
-        console.log(`  ⚠  ${errors.length} errors (see scraping_logs table)`);
-      }
-    } catch (err: any) {
-      console.error(`\n  ✗ Fatal error for store ${storeConfig.name}: ${err.message}`);
-      if (browser) await browser.close();
-
-      await supabase
-        .from('scraping_logs')
-        .update({
-          status: 'failed',
-          errors_count: 1,
-          error_messages: [err.message],
-          finished_at: new Date().toISOString(),
-        })
-        .eq('id', logId);
+    for (const line of env.split('\n')) {
+      const [key, ...vals] = line.split('=');
+      if (key && vals.length) process.env[key.trim()] = vals.join('=').trim();
     }
   }
 
-  console.log('\n🏁 Scraping complete.');
+  const supabase = getSupabase();
+  let totalAll = 0;
+
+  for (const store of STORES) {
+    try {
+      await scrapeStore(supabase, store);
+    } catch (e: any) {
+      console.error(`✗ Store ${store.name} failed: ${e.message}`);
+    }
+    await sleep(2000);
+  }
+
+  console.log('\n🏁 Scraping complete!');
 }
 
-main().catch(console.error);
+main().catch(e => { console.error(e); process.exit(1); });
